@@ -54,7 +54,7 @@ def tl_indexer_bwd_impl(
         IndexK: T.Tensor(index_k_shape, dtype),
         dIndexQ: T.Tensor(index_q_shape, dtype),
         dWeights: T.Tensor(weights_shape, dtype),
-        dIndexK: T.Tensor(index_k_shape, dtype),
+        dIndexK: T.Tensor(index_k_shape, accum_dtype),
         AttnScore: T.Tensor(shape_p, FP32),
         IndexScore: T.Tensor(shape_p, FP32),
         TopkIndices: T.Tensor(topk_indices_shape, INT32),
@@ -178,9 +178,12 @@ def indexer_bwd_interface(
     token_indices = prepare_token_indices(offsets)
     dq = torch.zeros_like(q)
     dweights = torch.zeros_like(weights)
-    dk = torch.zeros_like(k)
+    # Accumulate dK in FP32 to avoid bf16 atomic add issues on some toolchains.
+    dk = torch.zeros(k.shape, device=k.device, dtype=torch.float32)
     kernel = tl_indexer_bwd_impl(heads, dim, topk)
     kernel(q, weights, k, dq, dweights, dk, attn_score, index_score, topk_indices, offsets, token_indices)
+    if dk.dtype != k.dtype:
+        dk = dk.to(k.dtype)
     return dq, dweights, dk
 
 
