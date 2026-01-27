@@ -1,6 +1,6 @@
 import torch
 
-from indexer_topk_reducesum import indexer_topk_reducesum_interface
+from indexer_topk_reducesum_deepgemm import indexer_topk_reducesum_interface
 from sparse_mla_fwd import sparse_mla_fwd_interface
 
 
@@ -12,6 +12,7 @@ def main():
     tail_D = 64
     index_D = 128
     topk = 2048
+    use_deepgemm = True
 
     # ---- 输入 ----
     torch.manual_seed(0)
@@ -24,7 +25,9 @@ def main():
 
     # ---- 预热 ----
     for _ in range(10):
-        topk_indices, _ = indexer_topk_reducesum_interface(index_q, weights, index_k, topk, offsets)
+        topk_indices, _, _, _ = indexer_topk_reducesum_interface(
+            index_q, weights, index_k, topk, offsets, use_deepgemm=use_deepgemm
+        )
         sparse_mla_fwd_interface(q, kv.unsqueeze(-2), topk_indices.unsqueeze(-2), offsets, d_v=D)
     torch.cuda.synchronize()
 
@@ -38,7 +41,9 @@ def main():
     evt_total_start.record()
 
     evt_idx_start.record()
-    topk_indices, _ = indexer_topk_reducesum_interface(index_q, weights, index_k, topk, offsets)
+    topk_indices, _, gemm_cycles, topk_cycles = indexer_topk_reducesum_interface(
+        index_q, weights, index_k, topk, offsets, use_deepgemm=use_deepgemm
+    )
     evt_idx_end.record()
 
     sparse_mla_fwd_interface(q, kv.unsqueeze(-2), topk_indices.unsqueeze(-2), offsets, d_v=D)
@@ -54,6 +59,8 @@ def main():
     print(f"Indexer+TopK: {t_indexer:.3f} ms")
     print(f"Total forward: {t_total:.3f} ms")
     print(f"Indexer占比: {ratio * 100:.2f}%")
+    print(f"GemmCycles: {int(gemm_cycles.item())}")
+    print(f"TopkCycles: {int(topk_cycles.item())}")
 
 if __name__ == "__main__":
     main()
