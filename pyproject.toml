@@ -41,6 +41,7 @@ dependencies = [
     "tqdm>=4.62.3",
     "typing-extensions>=4.10.0",
     "z3-solver>=4.13.0",
+    "einops>=0.8.2",
 ]
 
 [project.optional-dependencies]
