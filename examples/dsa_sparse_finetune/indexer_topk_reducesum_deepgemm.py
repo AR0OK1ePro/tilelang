@@ -64,8 +64,6 @@ def tl_indexer_topk_reducesum_impl(
     weights_shape = [seq_len, heads]
     index_q_fp8_shape = [seq_len, heads, dim]  # MOD: deepgemm FP8 Q
     index_k_fp8_shape = [seq_len, dim]  # MOD: deepgemm FP8 K
-    dim_blocks = ceildiv(dim, 128)  # MOD: deepgemm K tiles
-    block_D = 128  # MOD: deepgemm K tile
     scale_q_shape = [seq_len]  # MOD: per-token Q scale
     scale_k_shape = [seq_len]  # MOD: per-token K scale
     topk_indices_shape = [seq_len, topk]
@@ -132,25 +130,19 @@ def tl_indexer_topk_reducesum_impl(
             T.copy(Weights[bos + i_t, :], weights_frag)
             T.sync_threads()
 
-            for i, j in T.Parallel(heads, dim):
-                indexQFp8_shared[i, j] = indexQFp8_shared[i, j] * sm_scale
-            T.sync_threads()
-
-            scale_q = ScaleQ[bos + i_t]
-
             for bk_i in T.Pipelined(num_blocks, num_stages=num_stages):
                 k_st = bk_i * block_K
                 k_ed = T.min((bk_i + 1) * block_K, eos - bos)
 
-                indexKFp8_shared = T.alloc_shared([block_K, dim], dtype=dtype)
+                indexKFp8_shared = T.alloc_shared([block_K, dim], dtype=FP8)
                 for i, j in T.Parallel(block_K, dim):
                     indexKFp8_shared[i, j] = T.if_then_else(k_st + i < k_ed, IndexKFp8[bos + k_st + i, j], 0)
                 T.sync_threads()
 
                 # MOD: deepgemm FP8 path
-                scale_k_shared = T.alloc_shared([block_K], dtype=FP32)
+                scale_logits_shared = T.alloc_shared([block_K], dtype=FP32)
                 for i in T.Parallel(block_K):
-                    scale_k_shared[i] = T.if_then_else(k_st + i < k_ed, ScaleK[bos + k_st + i], 0)
+                    scale_logits_shared[i] = T.if_then_else(k_st + i < k_ed, ScaleK[bos + k_st + i] * ScaleQ[bos + i_t] * sm_scale, 0)
                 T.sync_threads()
 
                 logits = T.alloc_fragment((block_K, heads), FP32)
@@ -165,7 +157,7 @@ def tl_indexer_topk_reducesum_impl(
                 T.sync_threads()
 
                 for i, j in T.Parallel(block_K, heads):
-                    logits[i, j] = T.max(logits[i, j], 0) * weights_frag[j]
+                    logits[i, j] = T.max(logits[i, j] * scale_logits_shared[i], 0) * weights_frag[j]
                 T.sync_threads()
 
                 logits_sum = T.alloc_fragment(block_K, FP32)
