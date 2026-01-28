@@ -91,12 +91,12 @@ def print_result(label, t_indexer, t_total, ratio):
 
 def main():
     inputs = build_inputs(
-        seq_len=2048,
-        heads=16,
+        seq_len=163840,
+        heads=64,
         dim=512,
         tail_dim=64,
         index_dim=128,
-        topk=64,
+        topk=2048,
     )
 
     t_total = measure_with_do_bench(inputs)
@@ -106,7 +106,7 @@ def main():
     print_result("cuda_event", t_indexer, t_total, ratio)
 
     print("\n[nsys] Example command:")
-    print("  nsys profile --trace=cuda,nvtx -o dsa_indexer_ratio python bench_indexer_ratio_forward.py")
+    print("  nsys profile --trace=cuda,nvtx --force-overwrite true -o /data/dsa_indexer_ratio python3 ./examples/dsa_sparse_finetune/bench_indexer_ratio_forward.py")
 
 
 if __name__ == "__main__":

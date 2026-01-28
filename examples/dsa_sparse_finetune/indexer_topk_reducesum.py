@@ -27,7 +27,7 @@ def tl_indexer_topk_reducesum_impl(
     dim: int,
     topk: int,
     sm_scale: Optional[float] = None,
-    block_K: int = 32,
+    block_K: int = 64,
     dtype: str = FP32,
     num_stages: int = 0,
     num_threads: int = 128,
