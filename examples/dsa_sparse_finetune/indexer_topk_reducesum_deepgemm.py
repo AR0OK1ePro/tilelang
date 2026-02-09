@@ -229,6 +229,7 @@ def indexer_topk_reducesum_interface(
     topk: int,
     offsets: torch.Tensor,
     dtype: str = BF16,
+    enable_profile: bool = True,
 ):
     seq_len, heads, dim = q.shape
     kernel = tl_indexer_topk_reducesum_impl(heads=heads, dim=dim, topk=topk, dtype=dtype)
@@ -240,13 +241,14 @@ def indexer_topk_reducesum_interface(
     k_fp8, scale_k = cast_k_token_scale(k)
     kernel(q_fp8, k_fp8, scale_q, scale_k, weights, topk_indices, topk_score, offsets, token_indices)
 
-    profiler = kernel.get_profiler()
-    latency = profiler.do_bench(warmup=50)
-    # Ensure that the latency is not None
-    assert latency is not None
-    print(f"latency: {latency} ms")
-    tflops = (seq_len * heads * seq_len * dim) / latency / 1e9
-    print(f"tflops: {tflops}")
+    if enable_profile:
+        profiler = kernel.get_profiler()
+        latency = profiler.do_bench(warmup=50)
+        # Ensure that the latency is not None
+        assert latency is not None
+        print(f"latency: {latency} ms")
+        tflops = (seq_len * heads * seq_len * dim) / latency / 1e9
+        print(f"tflops: {tflops}")
 
     return topk_indices, topk_score
 

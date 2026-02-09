@@ -28,7 +28,9 @@ def forward_once(inputs):
     q, kv, index_q, index_k, weights, offsets, topk, dim = inputs
     torch.cuda.nvtx.range_push("dsa/forward_total")
     torch.cuda.nvtx.range_push("dsa/indexer_topk")
-    topk_indices, _ = indexer_topk_reducesum_interface(index_q, weights, index_k, topk, offsets)
+    topk_indices, _ = indexer_topk_reducesum_interface(
+        index_q, weights, index_k, topk, offsets, enable_profile=False
+    )
     torch.cuda.nvtx.range_pop()
     torch.cuda.nvtx.range_push("dsa/sparse_mla_fwd")
     result = sparse_mla_fwd_interface(q, kv.unsqueeze(-2), topk_indices.unsqueeze(-2), offsets, d_v=dim)
@@ -71,7 +73,9 @@ def measure_with_cuda_events(inputs, *, warmup=10, rep=200):
     total_start.record()
     indexer_start.record()
     q, kv, index_q, index_k, weights, offsets, topk, dim = inputs
-    topk_indices, _ = indexer_topk_reducesum_interface(index_q, weights, index_k, topk, offsets)
+    topk_indices, _ = indexer_topk_reducesum_interface(
+        index_q, weights, index_k, topk, offsets, enable_profile=False
+    )
     indexer_end.record()
     sparse_mla_fwd_interface(q, kv.unsqueeze(-2), topk_indices.unsqueeze(-2), offsets, d_v=dim)
     total_end.record()
