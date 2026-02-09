@@ -1,7 +1,7 @@
 import torch
 from tilelang.profiler import do_bench
 
-from indexer_topk_reducesum import indexer_topk_reducesum_interface
+from indexer_topk_reducesum_deepgemm import indexer_topk_reducesum_interface
 from sparse_mla_fwd import sparse_mla_fwd_interface
 
 

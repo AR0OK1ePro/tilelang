@@ -12,7 +12,6 @@ def main():
     tail_D = 64
     index_D = 128
     topk = 2048
-    use_deepgemm = True
 
     # ---- 输入 ----
     torch.manual_seed(0)
@@ -59,8 +58,6 @@ def main():
     print(f"Indexer+TopK: {t_indexer:.3f} ms")
     print(f"Total forward: {t_total:.3f} ms")
     print(f"Indexer占比: {ratio * 100:.2f}%")
-    print(f"GemmCycles: {int(gemm_cycles.item())}")
-    print(f"TopkCycles: {int(topk_cycles.item())}")
 
 if __name__ == "__main__":
     main()
