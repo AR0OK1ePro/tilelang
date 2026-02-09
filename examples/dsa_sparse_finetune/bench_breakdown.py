@@ -24,7 +24,7 @@ def main():
 
     # ---- 预热 ----
     for _ in range(10):
-        topk_indices, _, _, _ = indexer_topk_reducesum_interface(
+        topk_indices, _ = indexer_topk_reducesum_interface(
             index_q, weights, index_k, topk, offsets
         )
         sparse_mla_fwd_interface(q, kv.unsqueeze(-2), topk_indices.unsqueeze(-2), offsets, d_v=D)
@@ -40,7 +40,7 @@ def main():
     evt_total_start.record()
 
     evt_idx_start.record()
-    topk_indices, _, = indexer_topk_reducesum_interface(
+    topk_indices, _ = indexer_topk_reducesum_interface(
         index_q, weights, index_k, topk, offsets
     )
     evt_idx_end.record()
