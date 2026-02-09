@@ -43,6 +43,79 @@ def cast_k_token_scale(x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     return x_scaled, (x_amax / 448.0)
 
 
+def _sum_ceil_1_to_n(n: int, d: int) -> int:
+    q, r = divmod(n, d)
+    return d * q * (q + 1) // 2 + r * (q + 1)
+
+
+def _sum_floor_0_to_n_minus_1(n: int, d: int) -> int:
+    q, r = divmod(n, d)
+    return d * q * (q - 1) // 2 + q * r
+
+
+def estimate_indexer_flops(
+    seq_len: int,
+    heads: int,
+    dim: int,
+    topk: int,
+    block_k: int = 128,
+):
+    sum_blocks = _sum_ceil_1_to_n(seq_len, block_k)
+    block_elems = block_k * sum_blocks
+
+    # 1) Main GEMM FLOPs actually executed by this kernel (includes block padding)
+    gemm_executed_flops = 2 * dim * heads * block_elems
+    # 2) Causal-valid GEMM FLOPs (ideal useful work, no padding)
+    gemm_useful_flops = heads * dim * seq_len * (seq_len + 1)
+
+    # Non-GEMM float ops in this kernel (rough estimate, excludes exp/max/compare)
+    scale_logits_flops = 2 * block_elems
+    post_relu_weight_flops = 2 * heads * block_elems
+    reduce_sum_flops = (heads - 1) * block_elems
+    softmax_shift_flops = seq_len * topk  # x - max
+    softmax_reduce_sum_flops = seq_len * (topk - 1)
+    softmax_div_flops = seq_len * topk
+    approx_total_flops_no_exp = (
+        gemm_executed_flops
+        + scale_logits_flops
+        + post_relu_weight_flops
+        + reduce_sum_flops
+        + softmax_shift_flops
+        + softmax_reduce_sum_flops
+        + softmax_div_flops
+    )
+
+    # Bitonic sort compare count (not FLOPs, but often dominates runtime for large topk)
+    n = 2 * topk
+    num_iters = int(round(math.log2(n)))
+    compares_per_sort = (n // 2) * (num_iters * (num_iters + 1) // 2)
+    sort_calls_per_token_total = seq_len + _sum_floor_0_to_n_minus_1(seq_len, topk)
+    bitonic_compare_ops = compares_per_sort * sort_calls_per_token_total
+
+    return {
+        "sum_blocks": sum_blocks,
+        "gemm_executed_flops": gemm_executed_flops,
+        "gemm_useful_flops": gemm_useful_flops,
+        "approx_total_flops_no_exp": approx_total_flops_no_exp,
+        "bitonic_compare_ops": bitonic_compare_ops,
+    }
+
+
+def bench_kernel_ms(kernel, kernel_args, warmup: int = 10, rep: int = 20) -> float:
+    for _ in range(warmup):
+        kernel(*kernel_args)
+    torch.cuda.synchronize()
+
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    start.record()
+    for _ in range(rep):
+        kernel(*kernel_args)
+    end.record()
+    torch.cuda.synchronize()
+    return start.elapsed_time(end) / rep
+
+
 @tl.jit(pass_configs=pass_configs)
 def tl_indexer_topk_reducesum_impl(
     heads: int,
@@ -242,18 +315,26 @@ def indexer_topk_reducesum_interface(
     kernel(q_fp8, k_fp8, scale_q, scale_k, weights, topk_indices, topk_score, offsets, token_indices)
 
     if enable_profile:
-        torch.cuda.synchronize()
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        kernel(q_fp8, k_fp8, scale_q, scale_k, weights, topk_indices, topk_score, offsets, token_indices)
-        end.record()
-        torch.cuda.synchronize()
+        latency = bench_kernel_ms(
+            kernel,
+            (q_fp8, k_fp8, scale_q, scale_k, weights, topk_indices, topk_score, offsets, token_indices),
+            warmup=10,
+            rep=20,
+        )
+        stat = estimate_indexer_flops(seq_len, heads, dim, topk)
 
-        latency = start.elapsed_time(end)
-        print(f"latency: {latency} ms")
-        tflops = (seq_len * heads * seq_len * dim) / latency / 1e9
-        print(f"tflops: {tflops}")
+        tflops_executed_gemm = stat["gemm_executed_flops"] / latency / 1e9
+        tflops_useful_gemm = stat["gemm_useful_flops"] / latency / 1e9
+        tflops_total_no_exp = stat["approx_total_flops_no_exp"] / latency / 1e9
+
+        print(f"kernel latency (kernel-only, warmup=10, rep=20): {latency:.3f} ms")
+        print(f"executed GEMM FLOPs/call: {stat['gemm_executed_flops']}")
+        print(f"useful GEMM FLOPs/call (causal valid): {stat['gemm_useful_flops']}")
+        print(f"approx total FLOPs/call (no exp/max/sort): {stat['approx_total_flops_no_exp']}")
+        print(f"approx bitonic compare ops/call: {stat['bitonic_compare_ops']}")
+        print(f"throughput (executed GEMM): {tflops_executed_gemm:.3f} TFLOP/s")
+        print(f"throughput (useful causal GEMM): {tflops_useful_gemm:.3f} TFLOP/s")
+        print(f"throughput (approx total no-exp): {tflops_total_no_exp:.3f} TFLOP/s")
 
     return topk_indices, topk_score
 
