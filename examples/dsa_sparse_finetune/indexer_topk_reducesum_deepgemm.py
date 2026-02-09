@@ -229,7 +229,7 @@ def indexer_topk_reducesum_interface(
     topk: int,
     offsets: torch.Tensor,
     dtype: str = BF16,
-    enable_profile: bool = True,
+    enable_profile: bool = False,
 ):
     seq_len, heads, dim = q.shape
     kernel = tl_indexer_topk_reducesum_impl(heads=heads, dim=dim, topk=topk, dtype=dtype)
@@ -242,10 +242,15 @@ def indexer_topk_reducesum_interface(
     kernel(q_fp8, k_fp8, scale_q, scale_k, weights, topk_indices, topk_score, offsets, token_indices)
 
     if enable_profile:
-        profiler = kernel.get_profiler()
-        latency = profiler.do_bench(warmup=50)
-        # Ensure that the latency is not None
-        assert latency is not None
+        torch.cuda.synchronize()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        kernel(q_fp8, k_fp8, scale_q, scale_k, weights, topk_indices, topk_score, offsets, token_indices)
+        end.record()
+        torch.cuda.synchronize()
+
+        latency = start.elapsed_time(end)
         print(f"latency: {latency} ms")
         tflops = (seq_len * heads * seq_len * dim) / latency / 1e9
         print(f"tflops: {tflops}")
@@ -293,7 +298,9 @@ def test_kernel(
 
     # ref_topk_indices, ref_topk_score = ref_index_score(q, weights, k, topk, offsets)
 
-    topk_indices, topk_score = indexer_topk_reducesum_interface(q, weights, k, topk, offsets)
+    topk_indices, topk_score = indexer_topk_reducesum_interface(
+        q, weights, k, topk, offsets, enable_profile=True
+    )
 
     # for j in range(S):
         # ref_np = ref_topk_indices[j].cpu().to(torch.int32).numpy()
