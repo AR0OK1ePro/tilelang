@@ -121,6 +121,7 @@ def tl_indexer_topk_reducesum_impl(
     heads: int,
     dim: int,
     topk: int,
+    seq_len: int = 163840,
     sm_scale: Optional[float] = None,
     block_K: int = 128,
     dtype: str = FP32,
@@ -131,10 +132,7 @@ def tl_indexer_topk_reducesum_impl(
     assert topk % block_K == 0
     assert heads <= 64 and heads % 8 == 0
     assert num_stages == 0
-    #batch_plus_one = T.symbolic("batch_plus_one")
-    #seq_len = T.symbolic("seq_len")
     batch_plus_one = 2
-    seq_len = 163840
 
     weights_shape = [seq_len, heads]
     index_q_fp8_shape = [seq_len, heads, dim]  # MOD: deepgemm FP8 Q
@@ -303,9 +301,11 @@ def indexer_topk_reducesum_interface(
     offsets: torch.Tensor,
     dtype: str = BF16,
     enable_profile: bool = False,
+    profile_warmup: int = 10,
+    profile_rep: int = 20,
 ):
     seq_len, heads, dim = q.shape
-    kernel = tl_indexer_topk_reducesum_impl(heads=heads, dim=dim, topk=topk, dtype=dtype)
+    kernel = tl_indexer_topk_reducesum_impl(heads=heads, dim=dim, topk=topk, seq_len=seq_len, dtype=dtype)
     token_indices = prepare_token_indices(offsets)
     topk_indices = torch.zeros((seq_len, topk), device=q.device, dtype=torch.int32)
     topk_score = torch.zeros((seq_len, topk), device=q.device, dtype=torch.float32)
@@ -318,8 +318,8 @@ def indexer_topk_reducesum_interface(
         latency = bench_kernel_ms(
             kernel,
             (q_fp8, k_fp8, scale_q, scale_k, weights, topk_indices, topk_score, offsets, token_indices),
-            warmup=10,
-            rep=20,
+            warmup=profile_warmup,
+            rep=profile_rep,
         )
         stat = estimate_indexer_flops(seq_len, heads, dim, topk)
 
@@ -327,7 +327,7 @@ def indexer_topk_reducesum_interface(
         tflops_useful_gemm = stat["gemm_useful_flops"] / latency / 1e9
         tflops_total_no_exp = stat["approx_total_flops_no_exp"] / latency / 1e9
 
-        print(f"kernel latency (kernel-only, warmup=10, rep=20): {latency:.3f} ms")
+        print(f"kernel latency (kernel-only, warmup={profile_warmup}, rep={profile_rep}): {latency:.3f} ms")
         print(f"executed GEMM FLOPs/call: {stat['gemm_executed_flops']}")
         print(f"useful GEMM FLOPs/call (causal valid): {stat['gemm_useful_flops']}")
         print(f"approx total FLOPs/call (no exp/max/sort): {stat['approx_total_flops_no_exp']}")
@@ -365,23 +365,64 @@ def ref_index_score(Q: torch.Tensor, Weights: torch.Tensor, K: torch.Tensor, top
 
 def test_kernel(
     B=1,
-    S=163840,
     H=64,
     D=128,
-    topk=2048,
+    cases: Optional[list[Tuple[int, int]]] = None,
 ):
-    torch.manual_seed(42)
+    del B  # unused, keep signature backward-compatible
+    if cases is None:
+        cases = [
+            (2048, 128),
+            (4096, 256),
+            (8192, 256),
+            (16384, 512),
+            (32768, 512),
+            (65536, 1024),
+            (98304, 1024),
+            (131072, 2048),
+            (163840, 2048),
+        ]
 
-    q = torch.randn((S, H, D)).cuda().bfloat16()
-    weights = torch.randn((S, H)).cuda().bfloat16()
-    k = torch.randn((S, D)).cuda().bfloat16()
-    offsets = torch.tensor([0, S], dtype=torch.int32).cuda()
+    for i, (S, topk) in enumerate(cases, start=1):
+        if topk > S:
+            print(f"[case {i}/{len(cases)}] skip S={S}, topk={topk}: topk must be <= S")
+            continue
+        if topk != tl.math.next_power_of_2(topk) or topk % 128 != 0:
+            print(f"[case {i}/{len(cases)}] skip S={S}, topk={topk}: topk must be power-of-2 and divisible by 128")
+            continue
 
-    # ref_topk_indices, ref_topk_score = ref_index_score(q, weights, k, topk, offsets)
+        # Keep long-shape sweep practical.
+        if S >= 131072:
+            warmup, rep = 1, 2
+        elif S >= 65536:
+            warmup, rep = 1, 3
+        elif S >= 16384:
+            warmup, rep = 2, 5
+        else:
+            warmup, rep = 3, 8
 
-    topk_indices, topk_score = indexer_topk_reducesum_interface(
-        q, weights, k, topk, offsets, enable_profile=True
-    )
+        print(f"\n[case {i}/{len(cases)}] S={S}, topk={topk}, H={H}, D={D}, warmup={warmup}, rep={rep}")
+        torch.manual_seed(42)
+        q = torch.randn((S, H, D)).cuda().bfloat16()
+        weights = torch.randn((S, H)).cuda().bfloat16()
+        k = torch.randn((S, D)).cuda().bfloat16()
+        offsets = torch.tensor([0, S], dtype=torch.int32).cuda()
+
+        # ref_topk_indices, ref_topk_score = ref_index_score(q, weights, k, topk, offsets)
+        topk_indices, topk_score = indexer_topk_reducesum_interface(
+            q,
+            weights,
+            k,
+            topk,
+            offsets,
+            enable_profile=True,
+            profile_warmup=warmup,
+            profile_rep=rep,
+        )
+
+        del q, weights, k, offsets, topk_indices, topk_score
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
 
     # for j in range(S):
         # ref_np = ref_topk_indices[j].cpu().to(torch.int32).numpy()
